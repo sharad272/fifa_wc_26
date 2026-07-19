@@ -14,11 +14,6 @@ Modular (service-style) layout — no monolith:
 | `src/game/` | Thin engine / orchestrator |
 | `src/ui/` | Shell markup + HUD |
 
-## Credits
-
-`public/models/player.glb` — "Man" animated character by
-[Quaternius](https://quaternius.com) (Public Domain / CC0), recolored at
-runtime into the Argentina kit and the keeper kit.
 
 ## Play locally
 
@@ -34,12 +29,6 @@ npm run build
 npm run preview
 ```
 
-## Deploy to Netlify
-
-1. Push this repo to GitHub.
-2. In [Netlify](https://app.netlify.com), **Add new site → Import an existing project**.
-3. Build settings are in `netlify.toml` (`npm run build` → `dist`).
-4. Or drag-and-drop `dist` onto [Netlify Drop](https://app.netlify.com/drop).
 
 ## How to play
 
