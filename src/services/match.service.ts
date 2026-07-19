@@ -8,7 +8,7 @@ export function hintText(
 ) {
   switch (phase) {
     case "aim_shoot":
-      return "Aim: low = grounded · high = aerial · corners = placed curl";
+      return "Move the gold crosshair on the goal · hold to charge · release to shoot";
     case "charge":
       return shotLabel
         ? `${shotLabel} · release to strike`

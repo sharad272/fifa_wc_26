@@ -16,6 +16,7 @@ import {
   type DiveHeight,
   type ShotStyle,
 } from "../services/shot.service.ts";
+import { KICK_CONTACT } from "../world3d/coords.ts";
 import { World3D } from "../world3d/World3D.ts";
 
 export class PenaltyGame {
@@ -337,18 +338,27 @@ export class PenaltyGame {
     }
 
     if (this.phase === "run_up") {
-      // ~0.9s jog from the mark to the ball, then the strike launches it
-      this.runUpT = clamp(this.runUpT + dt / 0.9, 0, 1);
+      // Approach (~0.75s) then plant/backswing so the foot meets the ball on launch
+      this.runUpT = clamp(this.runUpT + dt / 0.95, 0, 1);
+      // Final third of the run-up: load the kick up to the contact frame
+      if (this.runUpT > 0.68) {
+        const wind = (this.runUpT - 0.68) / 0.32;
+        this.messiKick = wind * KICK_CONTACT;
+      } else {
+        this.messiKick = 0;
+      }
       if (this.runUpT >= 1) {
+        // Ball leaves the foot on the contact frame
         this.phase = "ball_fly";
         this.ballT = 0;
-        this.messiKick = 0.25; // swing already underway at contact
+        this.messiKick = KICK_CONTACT;
         this.onHud();
       }
     }
 
     if (this.phase === "ball_fly" && this.shooterIsYou) {
-      this.messiKick = clamp(this.messiKick + dt * 4.2, 0, 1);
+      // Follow-through after contact
+      this.messiKick = clamp(this.messiKick + dt * 2.8, 0, 1);
     }
 
     if (this.phase === "result" && (this.goalCelebrate > 0 || this.messiCelebrate !== 0)) {

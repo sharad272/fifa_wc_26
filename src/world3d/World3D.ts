@@ -15,15 +15,35 @@ import {
   GOAL_H,
   GOAL_HALF_W,
   GOAL_LINE_Z,
+  KICK_CONTACT,
+  PENALTY_MARK,
   PITCH_D,
   PITCH_W,
   SPOT,
+  STRIKE_ROOT,
   ballWorldFromNorm,
   gameAimToWorld,
   gkWorldX,
 } from "./coords.ts";
 import { createCeleBannerTexture } from "./messiFace.ts";
 import { createRig, type Rig } from "./rig.ts";
+
+/** Round sprite for Points — without this, Three.js draws hard squares. */
+function softDotTexture() {
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 64;
+  const g = c.getContext("2d")!;
+  const grad = g.createRadialGradient(32, 32, 2, 32, 32, 30);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.45, "rgba(255,255,255,0.85)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
 export class World3D {
   readonly renderer: THREE.WebGLRenderer;
@@ -32,8 +52,7 @@ export class World3D {
   private messi: Humanoid;
   private keeper: Humanoid;
   private ball: THREE.Mesh;
-  private aimMarker: THREE.Mesh;
-  private saveZones: THREE.Group;
+  private aimMarker: THREE.Group;
   private confetti: THREE.Points | null = null;
   private clock = new THREE.Clock();
   private goalGlow: THREE.PointLight;
@@ -86,20 +105,8 @@ export class World3D {
     this.ball.position.copy(SPOT);
     this.scene.add(this.ball);
 
-    this.aimMarker = new THREE.Mesh(
-      new THREE.RingGeometry(0.18, 0.26, 32),
-      new THREE.MeshBasicMaterial({
-        color: "#e8b84a",
-        transparent: true,
-        opacity: 0.9,
-        side: THREE.DoubleSide,
-      }),
-    );
-    this.aimMarker.visible = false;
+    this.aimMarker = this.createAimReticle();
     this.scene.add(this.aimMarker);
-
-    this.saveZones = this.createSaveZones();
-    this.scene.add(this.saveZones);
 
     this.goalGlow = new THREE.PointLight("#e8b84a", 0, 12);
     this.goalGlow.position.set(0, GOAL_H * 0.6, GOAL_LINE_Z);
@@ -153,7 +160,6 @@ export class World3D {
         socks: "#f8fafc",
         skin: "#f4d2b0",
         hair: "#1c120c",
-        captainBand: true,
       },
       1.72,
     )
@@ -229,15 +235,16 @@ export class World3D {
       this.ball.rotation.set(0, 0, 0);
     }
 
+    // Crosshair on the goal — move pointer to place the shot
     const aiming = state.phase === "aim_shoot" || state.phase === "charge";
     this.aimMarker.visible = aiming && !anyGoal;
     if (aiming) {
       const aim = gameAimToWorld(state.aim.x, state.aim.y);
       this.aimMarker.position.copy(aim);
-      this.aimMarker.position.z += 0.05;
+      this.aimMarker.position.z += 0.06;
+      const pulse = 0.92 + Math.sin(t * 6) * 0.08;
+      this.aimMarker.scale.setScalar(pulse);
     }
-
-    this.saveZones.visible = false;
 
     // Keeper
     // Always commit toward the ball once it's in flight
@@ -352,59 +359,99 @@ export class World3D {
       return;
     }
 
-    // Penalty mark a few steps behind and beside the ball
-    const MARK = { x: 1.55, z: SPOT.z + 2.1 };
-    const STRIKE = { x: 0.55, z: SPOT.z + 0.55 };
+    const MARK = PENALTY_MARK;
+    const STRIKE = STRIKE_ROOT;
+    // Always face the goal (back to camera) — never spin via atan2 wraps
+    const faceGoal = (side = 0) => Math.PI - 0.12 - side * 0.2;
     rig.root.position.set(MARK.x, 0, MARK.z);
-    rig.root.position.y = 0;
 
     if (state.phase === "run_up") {
-      // Jog from the mark to the ball — back to the camera, eyes on goal
+      // Jog to the spot; when kick loads, plant and swing into the ball
       const r = state.runUpT;
+      const side = state.aim.x - 0.5;
+      if (state.messiKick > 0.01) {
+        this.poseMessiKick(rig, state.messiKick, side, state.aim.y);
+        return;
+      }
+      // Approach path ends exactly at the strike plant — body stays goal-facing
+      const ease = r * r * (3 - 2 * r);
       rig.root.position.set(
-        MARK.x + (STRIKE.x - MARK.x) * r,
+        MARK.x + (STRIKE.x - MARK.x) * ease,
         0,
-        MARK.z + (STRIKE.z - MARK.z) * r,
+        MARK.z + (STRIKE.z - MARK.z) * ease,
       );
-      rig.root.rotation.y = Math.atan2(STRIKE.x - MARK.x, STRIKE.z - MARK.z);
+      rig.root.rotation.set(0, faceGoal(side), 0);
       rig.play("Run", 0.1);
       rig.mixer.update(dt);
       return;
     }
 
     if (state.phase === "ball_fly") {
-      this.poseMessiKick(rig, state.messiKick);
+      this.poseMessiKick(
+        rig,
+        state.messiKick,
+        state.aim.x - 0.5,
+        state.aim.y,
+      );
+      return;
+    }
+
+    // Hold the follow-through briefly after contact (before cele / miss pose)
+    if (
+      state.phase === "result" &&
+      state.messiCelebrate === 0 &&
+      state.messiKick > KICK_CONTACT
+    ) {
+      this.poseMessiKick(
+        rig,
+        Math.min(1, state.messiKick + 0.12),
+        state.aim.x - 0.5,
+        state.aim.y,
+      );
       return;
     }
 
     if (state.phase === "charge") {
       // Face the goal — camera sees the back of his head
-      rig.root.rotation.y = Math.PI - 0.12;
-      rig.play("Idle", 0.15);
-      rig.mixer.update(dt);
+      const side = state.aim.x - 0.5;
+      const p = state.power;
+      rig.root.rotation.set(0, faceGoal(side), 0);
+      if (rig.currentClip) {
+        const prev = rig.actions[rig.currentClip];
+        if (prev) prev.stop();
+        rig.currentClip = "";
+      }
+      rig.resetPose();
       this.applyPenaltyStance(rig);
       // Coil into the strike as power builds
-      if (b.abdomen) b.abdomen.rotation.x += state.power * 0.18;
-      if (b.upperLegR) b.upperLegR.rotation.x -= state.power * 0.28;
+      rig.offset(b.abdomen, 0.05 + p * 0.12, side * p * 0.06, 0);
+      rig.offset(b.upperLegR, -0.1 - p * 0.22, 0, 0);
+      rig.offset(b.lowerLegR, 0.14 + p * 0.12, 0, 0);
+      rig.offset(b.upperArmL, 0.1 + p * 0.12, 0, 0.06);
+      rig.offset(b.upperArmR, 0.1 - p * 0.1, 0, -0.06);
       return;
     }
 
     if (state.phase === "result" && state.messiCelebrate < 0) {
-      // Disappointment — hands to the head, still up by the spot
-      rig.root.position.set(STRIKE.x, 0, STRIKE.z);
-      rig.root.rotation.y = 0.1;
-      rig.play("Idle", 0.15);
-      rig.mixer.update(dt);
-      if (b.upperArmL) b.upperArmL.rotation.z += 2.5;
-      if (b.upperArmR) b.upperArmR.rotation.z -= 2.5;
-      if (b.lowerArmL) b.lowerArmL.rotation.x -= 1.5;
-      if (b.lowerArmR) b.lowerArmR.rotation.x -= 1.5;
-      if (b.head) b.head.rotation.x += 0.25;
+      // Disappointment — hands to the head, still facing the goal
+      rig.root.position.set(STRIKE_ROOT.x, 0, STRIKE_ROOT.z);
+      rig.root.rotation.set(0, faceGoal(0), 0);
+      if (rig.currentClip) {
+        const prev = rig.actions[rig.currentClip];
+        if (prev) prev.stop();
+        rig.currentClip = "";
+      }
+      rig.resetPose();
+      rig.offset(b.upperArmL, -0.3, 0, 1.1);
+      rig.offset(b.upperArmR, -0.3, 0, -1.1);
+      rig.offset(b.lowerArmL, -0.9, 0, 0);
+      rig.offset(b.lowerArmR, -0.9, 0, 0);
+      rig.offset(b.head, 0.2, 0, 0);
       return;
     }
 
     // Aiming — face the goal, natural ready stance (back of head to camera)
-    rig.root.rotation.y = Math.PI - 0.12;
+    rig.root.rotation.set(0, faceGoal(0), 0);
     rig.play("Idle", 0.2);
     rig.mixer.update(dt);
     this.applyPenaltyStance(rig);
@@ -412,15 +459,26 @@ export class World3D {
   }
 
   /**
-   * Human penalty strike: plant left, load right leg, whip through the ball,
-   * balanced arms — no Idle mixer fighting the pose.
+   * Penalty strike using local-axis offsets from bind pose only.
+   * Writing Euler components on this rig stretches the skin — never do that.
    */
-  private poseMessiKick(rig: Rig, kick: number) {
+  private poseMessiKick(
+    rig: Rig,
+    kick: number,
+    aimSide = 0,
+    aimY = 0.45,
+  ) {
     const b = rig.bones;
-    const STRIKE = { x: 0.55, z: SPOT.z + 0.55 };
-    rig.root.position.set(STRIKE.x, 0, STRIKE.z);
-    // Side-on to the goal (right foot striking)
-    rig.root.rotation.y = Math.PI - 0.42;
+    const k = Math.min(1, Math.max(0, kick));
+    const drive = Math.max(0, (k - KICK_CONTACT) / (1 - KICK_CONTACT));
+    // Plant next to the ball; small step through after contact
+    rig.root.position.set(
+      STRIKE_ROOT.x + aimSide * 0.06 * drive,
+      0,
+      STRIKE_ROOT.z - drive * 0.35,
+    );
+    // Face the goal only — no pitch/roll on the root
+    rig.root.rotation.set(0, Math.PI - 0.14 - aimSide * 0.15, 0);
 
     if (rig.currentClip) {
       const prev = rig.actions[rig.currentClip];
@@ -429,55 +487,39 @@ export class World3D {
     }
     rig.resetPose();
 
-    const k = Math.min(1, Math.max(0, kick));
-    // Smooth ease: backswing (0→0.3) → contact (0.3→0.55) → follow-through
+    // swing: -1 backswing → 0 contact → +1 follow-through
     let swing: number;
-    if (k < 0.3) {
-      const t = k / 0.3;
-      swing = -Math.sin(t * Math.PI * 0.5); // 0 → -1 (load)
-    } else if (k < 0.55) {
-      const t = (k - 0.3) / 0.25;
-      swing = -1 + t * t * (3 - 2 * t) * 1.15; // -1 → +0.15 (strike)
+    if (k < KICK_CONTACT) {
+      swing = -Math.sin((k / KICK_CONTACT) * Math.PI * 0.5);
     } else {
-      const t = (k - 0.55) / 0.45;
-      swing = 0.15 + Math.sin(t * Math.PI * 0.5) * 1.05; // → +1.2 follow
+      swing = Math.sin(((k - KICK_CONTACT) / (1 - KICK_CONTACT)) * Math.PI * 0.5);
     }
 
-    // Plant leg (left) — firm, slight bend
-    if (b.upperLegL) b.upperLegL.rotation.x -= 0.18;
-    if (b.lowerLegL) b.lowerLegL.rotation.x += 0.28;
-    if (b.footL) b.footL.rotation.x += 0.08;
+    const loft = Math.min(1, Math.max(0, 1 - (aimY - 0.2) / 0.55));
+    const side = Math.max(-0.5, Math.min(0.5, aimSide));
 
-    // Striking leg (right) — hip drive + knee whip
-    if (b.upperLegR) b.upperLegR.rotation.x += swing * 1.05;
-    if (b.lowerLegR) {
-      // Knee bends on backswing, snaps straighter through contact
-      const knee = swing < 0 ? -swing * 1.15 : Math.max(0, 0.35 - swing * 0.25);
-      b.lowerLegR.rotation.x += knee;
-    }
-    if (b.footR) b.footR.rotation.x += swing < 0 ? 0.25 : -0.15;
+    // Gentle local offsets — clamped so the mesh never shears
+    const legSwing = swing * (0.7 + loft * 0.1);
+    const knee =
+      swing < 0 ? -swing * 0.75 : Math.max(0, 0.25 - swing * 0.15);
 
-    // Hips / torso rotate into the kick (aligned, not twisted oddly)
-    if (b.hips) b.hips.rotation.y += swing * 0.18;
-    if (b.abdomen) {
-      b.abdomen.rotation.x += Math.max(0, swing) * 0.22;
-      b.abdomen.rotation.y += swing * 0.12;
-    }
-    if (b.torso) b.torso.rotation.y += swing * 0.1;
+    rig.offset(b.upperLegL, -0.12, 0, 0.04);
+    rig.offset(b.lowerLegL, 0.18, 0, 0);
+    rig.offset(b.footL, 0.06, 0, 0);
 
-    // Arms for balance — opposite to kick, shoulders level
-    if (b.upperArmL) {
-      b.upperArmL.rotation.x += swing * 0.55;
-      b.upperArmL.rotation.z += 0.25 + Math.abs(swing) * 0.15;
-    }
-    if (b.upperArmR) {
-      b.upperArmR.rotation.x -= swing * 0.4;
-      b.upperArmR.rotation.z -= 0.2;
-    }
-    if (b.lowerArmL) b.lowerArmL.rotation.x -= 0.35;
-    if (b.lowerArmR) b.lowerArmR.rotation.x -= 0.25;
-    if (b.head) b.head.rotation.x -= 0.12; // eyes on the ball / goal
-    if (b.neck) b.neck.rotation.y += 0.08;
+    rig.offset(b.upperLegR, legSwing, side * 0.08, -0.05);
+    rig.offset(b.lowerLegR, knee, 0, 0);
+    rig.offset(b.footR, swing < 0 ? 0.15 : -0.12, 0, 0);
+
+    // Soft torso lean — never yaw the hips hard (that was shredding the shorts)
+    rig.offset(b.abdomen, 0.06 + Math.max(0, swing) * 0.18, side * 0.1, 0);
+    rig.offset(b.torso, Math.max(0, swing) * 0.08, side * 0.08, 0);
+
+    rig.offset(b.upperArmL, swing * 0.35, 0, 0.12 + Math.abs(swing) * 0.08);
+    rig.offset(b.upperArmR, -swing * 0.28, 0, -0.1);
+    rig.offset(b.lowerArmL, -0.25, 0, 0);
+    rig.offset(b.lowerArmR, -0.2, 0, 0);
+    rig.offset(b.head, -0.1, side * 0.06, 0);
   }
 
   /**
@@ -487,28 +529,27 @@ export class World3D {
   private poseMessiCelebration(rig: Rig, celebrateT: number, dt: number) {
     const b = rig.bones;
     const RUN_END = 1.7;
-    const from = { x: 0.55, z: SPOT.z + 0.55 };
+    const from = { x: STRIKE_ROOT.x, z: STRIKE_ROOT.z };
     const to = { x: -0.35, z: SPOT.z + 4.4 };
 
     if (celebrateT < RUN_END) {
-      // Sprint celebration — camera tracks him
+      // Sprint toward camera — turn 180° smoothly (goal → camera), no wrap spin
       const r = Math.min(1, celebrateT / RUN_END);
       const ease = r * r * (3 - 2 * r);
       const x = from.x + (to.x - from.x) * ease;
       const z = from.z + (to.z - from.z) * ease;
       rig.root.position.set(x, 0, z);
-      rig.root.rotation.y = Math.atan2(to.x - from.x, to.z - from.z);
+      // Math.PI (face goal) → 0 (face camera) along the short arc
+      rig.root.rotation.set(0, Math.PI * (1 - ease), 0);
       rig.play("Run", 0.1);
       rig.mixer.update(dt);
       return;
     }
 
-    // Plant facing the camera — iconic sky-point.
-    // Keep bind-pose spine/shoulders; only layer mirrored arm raises.
-    // No mixer here so Idle can't twist elbows out of alignment.
+    // Plant facing the camera — iconic sky-point (local offsets only)
     const plantT = celebrateT - RUN_END;
     rig.root.position.set(to.x, 0, to.z);
-    rig.root.rotation.y = 0; // square to camera for the sky-point
+    rig.root.rotation.set(0, 0, 0);
     if (rig.currentClip) {
       const prev = rig.actions[rig.currentClip];
       if (prev) prev.stop();
@@ -517,73 +558,44 @@ export class World3D {
     rig.resetPose();
 
     const raise = Math.min(1, plantT * 3.8);
-    // Exact mirrored arms from a shared base so shoulders stay level
-    const baseX =
-      ((b.upperArmL?.rotation.x ?? 0) + (b.upperArmR?.rotation.x ?? 0)) * 0.5;
-    const armZ = 2.68 * raise;
-    if (b.upperArmL) b.upperArmL.rotation.set(baseX - 0.12 * raise, 0.05 * raise, armZ);
-    if (b.upperArmR) b.upperArmR.rotation.set(baseX - 0.12 * raise, -0.05 * raise, -armZ);
-    // Straight elbows / neutral wrists — identical on both sides
-    if (b.lowerArmL) b.lowerArmL.rotation.set(0.55 * raise, 0, 0);
-    if (b.lowerArmR) b.lowerArmR.rotation.set(0.55 * raise, 0, 0);
-    if (b.palmL) b.palmL.rotation.set(0, 0, 0);
-    if (b.palmR) b.palmR.rotation.set(0, 0, 0);
-    if (b.head) b.head.rotation.x -= 0.55 * raise;
-    if (b.neck) b.neck.rotation.x -= 0.12 * raise;
+    const armZ = 1.35 * raise;
+    rig.offset(b.upperArmL, -0.35 * raise, 0.04 * raise, armZ);
+    rig.offset(b.upperArmR, -0.35 * raise, -0.04 * raise, -armZ);
+    rig.offset(b.lowerArmL, 0.35 * raise, 0, 0);
+    rig.offset(b.lowerArmR, 0.35 * raise, 0, 0);
+    rig.offset(b.palmL, 0, 0, 0);
+    rig.offset(b.palmR, 0, 0, 0);
+    rig.offset(b.head, -0.35 * raise, 0, 0);
+    rig.offset(b.neck, -0.08 * raise, 0, 0);
 
     const hop =
       plantT < 0.45
-        ? Math.sin((plantT / 0.45) * Math.PI) * 0.3
-        : 0.025 * Math.sin(plantT * 5.5);
+        ? Math.sin((plantT / 0.45) * Math.PI) * 0.22
+        : 0.02 * Math.sin(plantT * 5.5);
     rig.root.position.y = hop;
     void dt;
   }
 
   /**
-   * Natural pre-penalty ready stance: upright, soft knees, arms hanging
-   * loosely at the sides with relaxed hands (no twisted paddles).
+   * Natural pre-penalty ready stance: upright, soft knees, arms at sides.
+   * Uses local-axis offsets from rest so the skin stays intact.
    */
   private applyPenaltyStance(rig: Rig) {
     const b = rig.bones;
-    // Kill idle motion on torso / head / arms so the pose stays clean
-    rig.rest(b.abdomen);
-    rig.rest(b.torso);
-    rig.rest(b.neck);
-    rig.rest(b.head);
-    rig.rest(b.upperArmL);
-    rig.rest(b.upperArmR);
-    rig.rest(b.lowerArmL);
-    rig.rest(b.lowerArmR);
-    rig.rest(b.palmL);
-    rig.rest(b.palmR);
-    // Soft athletic crouch
-    if (b.upperLegL) b.upperLegL.rotation.x -= 0.1;
-    if (b.upperLegR) b.upperLegR.rotation.x -= 0.12;
-    if (b.lowerLegL) b.lowerLegL.rotation.x += 0.16;
-    if (b.lowerLegR) b.lowerLegR.rotation.x += 0.18;
-    // Arms hang close to the body — tiny outward flare only
-    if (b.upperArmL) {
-      b.upperArmL.rotation.x += 0.15;
-      b.upperArmL.rotation.z += 0.08;
-    }
-    if (b.upperArmR) {
-      b.upperArmR.rotation.x += 0.15;
-      b.upperArmR.rotation.z -= 0.08;
-    }
-    // Soft elbow bend so hands sit by the thighs (not stiff T / paddle)
-    if (b.lowerArmL) {
-      b.lowerArmL.rotation.x -= 0.25;
-      b.lowerArmL.rotation.y = 0;
-      b.lowerArmL.rotation.z = 0;
-    }
-    if (b.lowerArmR) {
-      b.lowerArmR.rotation.x -= 0.25;
-      b.lowerArmR.rotation.y = 0;
-      b.lowerArmR.rotation.z = 0;
-    }
-    // Neutral wrists — palms toward thighs
-    if (b.palmL) b.palmL.rotation.set(0.15, 0, 0.1);
-    if (b.palmR) b.palmR.rotation.set(0.15, 0, -0.1);
+    rig.offset(b.abdomen, 0, 0, 0);
+    rig.offset(b.torso, 0, 0, 0);
+    rig.offset(b.neck, 0, 0, 0);
+    rig.offset(b.head, 0, 0, 0);
+    rig.offset(b.upperLegL, -0.08, 0, 0);
+    rig.offset(b.upperLegR, -0.1, 0, 0);
+    rig.offset(b.lowerLegL, 0.12, 0, 0);
+    rig.offset(b.lowerLegR, 0.14, 0, 0);
+    rig.offset(b.upperArmL, 0.1, 0, 0.06);
+    rig.offset(b.upperArmR, 0.1, 0, -0.06);
+    rig.offset(b.lowerArmL, -0.2, 0, 0);
+    rig.offset(b.lowerArmR, -0.2, 0, 0);
+    rig.offset(b.palmL, 0.1, 0, 0.06);
+    rig.offset(b.palmR, 0.1, 0, -0.06);
   }
 
   /** Drive the rigged CPU keeper: ready sway or dive toward the ball. */
@@ -595,68 +607,65 @@ export class World3D {
   ) {
     const rig = this.keeperRig!;
     const b = rig.bones;
-    rig.resetPose();
-    rig.root.position.z = GOAL_LINE_Z + 0.55;
-    rig.root.rotation.y = 0;
-    rig.play("Idle", 0.12);
-    rig.mixer.update(dt);
-
     const kx = gkWorldX(state.gkX);
-    rig.root.position.x = kx;
+    rig.root.position.z = GOAL_LINE_Z + 0.55;
 
     if (diveActive) {
-      // Dive in the direction of the ball relative to the keeper
       const ballX = gkWorldX(state.ball.x);
       const dx = ballX - kx;
       const dir = Math.sign(dx) || Math.sign(state.gkDive) || 1;
       const a = Math.min(1, Math.abs(dx) / 2.8 + Math.abs(state.gkDive) * 1.2);
-
-      // Height: high ball → stretch up; low ball → collapse low
       const ballY = Math.max(0.15, 2.2 - state.ball.y * 3.5);
       const high = Math.min(1, Math.max(0, (ballY - 0.9) / 1.2));
       const low = 1 - high;
 
-      rig.root.rotation.z = -dir * a * (0.85 + low * 0.35);
-      rig.root.position.y = -a * (0.15 + low * 0.45) + high * 0.12;
+      if (rig.currentClip) {
+        const prev = rig.actions[rig.currentClip];
+        if (prev) prev.stop();
+        rig.currentClip = "";
+      }
+      rig.resetPose();
+      rig.root.position.x = kx;
+      rig.root.position.y = -a * (0.1 + low * 0.3) + high * 0.08;
+      rig.root.rotation.set(0, 0, -dir * a * (0.5 + low * 0.18));
 
-      // Lead with the near-side arm toward the ball
+      const reach = (1.0 + high * 0.3) * a;
       if (dir < 0) {
-        if (b.upperArmL) b.upperArmL.rotation.z += (2.2 + high * 0.7) * a;
-        if (b.upperArmR) b.upperArmR.rotation.z -= (1.4 + high * 0.4) * a;
-        if (b.lowerArmL) b.lowerArmL.rotation.x -= high * 0.4;
+        rig.offset(b.upperArmL, -0.15 * a, 0, reach);
+        rig.offset(b.upperArmR, -0.1 * a, 0, -0.55 * a);
+        rig.offset(b.lowerArmL, -0.2 * high, 0, 0);
       } else {
-        if (b.upperArmR) b.upperArmR.rotation.z -= (2.2 + high * 0.7) * a;
-        if (b.upperArmL) b.upperArmL.rotation.z += (1.4 + high * 0.4) * a;
-        if (b.lowerArmR) b.lowerArmR.rotation.x -= high * 0.4;
+        rig.offset(b.upperArmR, -0.15 * a, 0, -reach);
+        rig.offset(b.upperArmL, -0.1 * a, 0, 0.55 * a);
+        rig.offset(b.lowerArmR, -0.2 * high, 0, 0);
       }
-      if (b.head) {
-        b.head.rotation.y += dir * 0.25 * a;
-        b.head.rotation.x -= high * 0.35;
-      }
-      if (b.upperLegL) b.upperLegL.rotation.x -= a * (0.25 + low * 0.3);
-      if (b.upperLegR) b.upperLegR.rotation.x -= a * (0.2 + low * 0.25);
-      if (b.lowerLegL) b.lowerLegL.rotation.x += a * 0.45;
-      if (b.lowerLegR) b.lowerLegR.rotation.x += a * 0.4;
-    } else {
-      rig.root.rotation.z = 0;
-      rig.root.position.y = 0;
-      // Ready crouch — slight shuffle toward aim when charging
-      const shuffle =
-        state.phase === "charge" || state.phase === "aim_shoot"
-          ? (state.aim.x - 0.5) * 0.35
-          : 0;
-      rig.root.position.x = kx + shuffle * 0.15;
-      if (b.head) {
-        b.head.rotation.x -= 0.3;
-        b.head.rotation.y += shuffle * 0.4;
-      }
-      if (b.upperLegL) b.upperLegL.rotation.x -= 0.3;
-      if (b.upperLegR) b.upperLegR.rotation.x -= 0.3;
-      if (b.lowerLegL) b.lowerLegL.rotation.x += 0.45;
-      if (b.lowerLegR) b.lowerLegR.rotation.x += 0.45;
-      if (b.upperArmL) b.upperArmL.rotation.z += 0.6 + Math.sin(t * 3) * 0.06;
-      if (b.upperArmR) b.upperArmR.rotation.z -= 0.6 + Math.sin(t * 3) * 0.06;
+      rig.offset(b.head, -high * 0.15, dir * 0.12 * a, 0);
+      rig.offset(b.upperLegL, -a * (0.12 + low * 0.15), 0, 0);
+      rig.offset(b.upperLegR, -a * (0.12 + low * 0.15), 0, 0);
+      rig.offset(b.lowerLegL, a * 0.25, 0, 0);
+      rig.offset(b.lowerLegR, a * 0.22, 0, 0);
+      return;
     }
+
+    // Ready stance — Idle + light crouch offsets
+    rig.resetPose();
+    rig.root.rotation.set(0, 0, 0);
+    rig.root.position.y = 0;
+    const shuffle =
+      state.phase === "charge" || state.phase === "aim_shoot"
+        ? (state.aim.x - 0.5) * 0.35
+        : 0;
+    rig.root.position.x = kx + shuffle * 0.15;
+    rig.play("Idle", 0.12);
+    rig.mixer.update(dt);
+    const bob = Math.sin(t * 3) * 0.04;
+    rig.offset(b.head, -0.15, shuffle * 0.2, 0);
+    rig.offset(b.upperLegL, -0.18, 0, 0);
+    rig.offset(b.upperLegR, -0.18, 0, 0);
+    rig.offset(b.lowerLegL, 0.28, 0, 0);
+    rig.offset(b.lowerLegR, 0.28, 0, 0);
+    rig.offset(b.upperArmL, 0, 0, 0.45 + bob);
+    rig.offset(b.upperArmR, 0, 0, -0.45 - bob);
   }
 
   render() {
@@ -735,9 +744,18 @@ export class World3D {
     }
     crowdGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     crowdGeo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    // Soft round dots — default Points are square pixels
     const crowd = new THREE.Points(
       crowdGeo,
-      new THREE.PointsMaterial({ size: 0.12, vertexColors: true }),
+      new THREE.PointsMaterial({
+        size: 0.22,
+        vertexColors: true,
+        map: softDotTexture(),
+        transparent: true,
+        depthWrite: false,
+        sizeAttenuation: true,
+        opacity: 0.9,
+      }),
     );
     this.scene.add(crowd);
 
@@ -972,51 +990,19 @@ export class World3D {
     return ball;
   }
 
-  private createSaveZones() {
+  /** Compact gold ring on the goal — where the shot is aimed. */
+  private createAimReticle() {
     const g = new THREE.Group();
-    const labels = ["LEFT", "CENTER", "RIGHT"];
-    for (let i = 0; i < 3; i++) {
-      const panel = new THREE.Mesh(
-        new THREE.PlaneGeometry((GOAL_HALF_W * 2) / 3 - 0.08, GOAL_H - 0.1),
-        new THREE.MeshBasicMaterial({
-          color: i === 1 ? "#e8b84a" : "#f4f7f2",
-          transparent: true,
-          opacity: i === 1 ? 0.18 : 0.1,
-          side: THREE.DoubleSide,
-        }),
-      );
-      panel.position.set(
-        -GOAL_HALF_W + (GOAL_HALF_W * 2) / 6 + (i * GOAL_HALF_W * 2) / 3,
-        GOAL_H / 2,
-        GOAL_LINE_Z + 0.08,
-      );
-      g.add(panel);
-
-      const canvas = document.createElement("canvas");
-      canvas.width = 128;
-      canvas.height = 64;
-      const ctx = canvas.getContext("2d")!;
-      ctx.fillStyle = "rgba(8,20,16,0.75)";
-      ctx.fillRect(0, 0, 128, 64);
-      ctx.fillStyle = i === 1 ? "#e8b84a" : "#f4f7f2";
-      ctx.font = "bold 22px Sora, sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(labels[i], 64, 32);
-      const tex = new THREE.CanvasTexture(canvas);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      const label = new THREE.Mesh(
-        new THREE.PlaneGeometry(1.1, 0.45),
-        new THREE.MeshBasicMaterial({
-          map: tex,
-          transparent: true,
-          side: THREE.DoubleSide,
-        }),
-      );
-      label.position.copy(panel.position);
-      label.position.z += 0.02;
-      g.add(label);
-    }
+    g.name = "AimReticle";
+    const mat = new THREE.MeshBasicMaterial({
+      color: "#f0d060",
+      transparent: true,
+      opacity: 0.95,
+      depthTest: true,
+      side: THREE.DoubleSide,
+    });
+    g.add(new THREE.Mesh(new THREE.RingGeometry(0.14, 0.2, 40), mat));
+    g.add(new THREE.Mesh(new THREE.CircleGeometry(0.035, 20), mat));
     g.visible = false;
     return g;
   }
@@ -1049,7 +1035,14 @@ export class World3D {
     geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
     this.confetti = new THREE.Points(
       geo,
-      new THREE.PointsMaterial({ size: 0.1, vertexColors: true }),
+      new THREE.PointsMaterial({
+        size: 0.16,
+        vertexColors: true,
+        map: softDotTexture(),
+        transparent: true,
+        depthWrite: false,
+        sizeAttenuation: true,
+      }),
     );
     this.scene.add(this.confetti);
   }

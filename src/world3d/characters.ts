@@ -197,12 +197,16 @@ export const MESSI_FACE_YAW = 0.65;
 
 export function poseMessiKick(h: Humanoid, kick: number) {
   poseMessiIdle(h);
-  h.leftLeg.rotation.x = -0.2 - kick * 1.1;
-  h.rightLeg.rotation.x = 0.15;
-  h.leftArm.rotation.x = -0.4 * kick;
-  h.rightArm.rotation.x = 0.3 * kick;
-  // Turn toward the goal as the strike progresses
-  h.root.rotation.y = MESSI_FACE_YAW + (Math.PI - MESSI_FACE_YAW) * kick;
+  const k = Math.min(1, Math.max(0, kick));
+  h.leftLeg.rotation.x = -0.22 - Math.max(0, k - 0.3) * 0.35;
+  h.rightLeg.rotation.x = k < 0.35 ? -k * 2.2 : -0.77 + (k - 0.35) * 2.4;
+  h.torso.rotation.x = 0.08 + Math.max(0, k - 0.35) * 0.35;
+  h.torso.rotation.y = -0.15 - k * 0.2;
+  h.leftArm.rotation.x = -0.2 + k * 0.7;
+  h.rightArm.rotation.x = 0.15 - k * 0.55;
+  h.root.rotation.y =
+    MESSI_FACE_YAW + (Math.PI - 0.4 - MESSI_FACE_YAW) * Math.min(1, k * 1.2);
+  h.root.position.y = Math.sin(Math.min(1, k * 1.3) * Math.PI) * 0.04;
 }
 
 /** Iconic Messi celebration — both index fingers to the sky. */

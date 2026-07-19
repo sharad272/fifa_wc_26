@@ -9,6 +9,16 @@ export const GOAL_H = 2.44;
 export const PITCH_W = 28;
 export const PITCH_D = 40;
 
+/** Run-up start (behind the ball, camera side). */
+export const PENALTY_MARK = { x: 1.2, z: SPOT.z + 1.85 };
+/**
+ * Body root at contact — just behind/right of the ball so the right foot
+ * reaches SPOT without twisting the hips off-axis.
+ */
+export const STRIKE_ROOT = { x: 0.18, z: SPOT.z + 0.28 };
+/** Kick progress (0..1) where swing crosses the ball — keep in sync with poseMessiKick. */
+export const KICK_CONTACT = 0.45;
+
 export function gameAimToWorld(gx: number, gy: number): THREE.Vector3 {
   const left = GOAL.x - GOAL.w / 2;
   const t = (gx - left) / GOAL.w;

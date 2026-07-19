@@ -40,6 +40,16 @@ export interface Rig {
   resetPose(): void;
   /** Restore ONE bone to rest AFTER mixer.update, overriding the clip. */
   rest(bone: THREE.Object3D | undefined): void;
+  /**
+   * Apply a small local-axis offset from rest (rotateX/Y/Z). Safer than
+   * writing Euler components on Quaternius bones, which breaks the skin.
+   */
+  offset(
+    bone: THREE.Object3D | undefined,
+    rx?: number,
+    ry?: number,
+    rz?: number,
+  ): void;
   currentClip: string;
 }
 
@@ -50,8 +60,6 @@ export interface RigColors {
   socks: string;
   skin: string;
   hair: string;
-  /** Black captain's armband on the left arm (Messi). */
-  captainBand?: boolean;
 }
 
 const BONE_LOOKUP: Array<[keyof RigBones, string]> = [
@@ -141,78 +149,6 @@ function stripeShirt(mesh: THREE.Mesh) {
   mat.needsUpdate = true;
 }
 
-/** Classic black captain's armband with celeste trim — left upper arm. */
-function attachCaptainBand(bones: RigBones, root: THREE.Object3D) {
-  // On the left hand / wrist (palm), falling back to forearm
-  const hand = bones.palmL || bones.lowerArmL;
-  if (!hand) return;
-
-  root.updateMatrixWorld(true);
-  const ws = new THREE.Vector3();
-  hand.getWorldScale(ws);
-  // Convert metre-sized geo into this bone's local space
-  const inv = 1 / Math.max(1e-4, (Math.abs(ws.x) + Math.abs(ws.y) + Math.abs(ws.z)) / 3);
-
-  const band = new THREE.Group();
-  band.name = "CaptainBand";
-  band.scale.setScalar(inv);
-
-  const black = new THREE.MeshStandardMaterial({
-    color: "#0a0a0c",
-    roughness: 0.5,
-    metalness: 0.12,
-  });
-  const trim = new THREE.MeshStandardMaterial({
-    color: "#7ec0f0",
-    roughness: 0.35,
-    metalness: 0.2,
-  });
-
-  // Stacked toruses — wrist band on the left hand
-  const rings: Array<[number, number, THREE.Material]> = [
-    [0.032, 0.005, trim],
-    [0.033, 0.011, black],
-    [0.033, 0.011, black],
-    [0.032, 0.005, trim],
-  ];
-  let y = -0.016;
-  for (const [r, tube, mat] of rings) {
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(r, tube, 10, 28), mat);
-    ring.rotation.x = Math.PI / 2; // torus axis → bone Y
-    ring.position.y = y;
-    y += tube * 1.65;
-    band.add(ring);
-  }
-
-  const canvas = document.createElement("canvas");
-  canvas.width = 64;
-  canvas.height = 64;
-  const ctx = canvas.getContext("2d")!;
-  ctx.clearRect(0, 0, 64, 64);
-  ctx.fillStyle = "#e8b84a";
-  ctx.font = "bold 48px Sora, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("C", 32, 34);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  const badge = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.02, 0.02),
-    new THREE.MeshBasicMaterial({
-      map: tex,
-      transparent: true,
-      side: THREE.DoubleSide,
-    }),
-  );
-  badge.position.set(0.034, 0, 0);
-  badge.rotation.y = Math.PI / 2;
-  band.add(badge);
-
-  // Sit on the left wrist / hand
-  band.position.set(0, bones.palmL ? 0.01 * inv : -0.08 * inv, 0);
-  hand.add(band);
-}
-
 export async function createRig(
   url: string,
   colors: RigColors,
@@ -284,8 +220,6 @@ export async function createRig(
     inner.position.y = -footPos.y + targetHeight * 0.045;
   }
 
-  if (colors.captainBand) attachCaptainBand(bones, root);
-
   // Snapshot rest rotations of every node so pose offsets can be undone
   const restMap = new Map<THREE.Object3D, THREE.Quaternion>();
   inner.traverse((o) => {
@@ -322,6 +256,15 @@ export async function createRig(
       if (!bone) return;
       const q = restMap.get(bone);
       if (q) bone.quaternion.copy(q);
+    },
+    offset(bone, rx = 0, ry = 0, rz = 0) {
+      if (!bone) return;
+      const q = restMap.get(bone);
+      if (q) bone.quaternion.copy(q);
+      else bone.quaternion.identity();
+      if (rx) bone.rotateX(rx);
+      if (ry) bone.rotateY(ry);
+      if (rz) bone.rotateZ(rz);
     },
   };
   return rig;
